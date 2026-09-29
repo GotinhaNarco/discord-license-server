@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 import hashlib
 import secrets
-import sqlite3
+import os
+import psycopg
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
