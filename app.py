@@ -414,3 +414,201 @@ def validate(data: ValidateRequest):
         "success": True,
         "status": "active"
     }
+# ============================================================
+# ADMINISTRAÇÃO
+# ============================================================
+
+from datetime import timedelta
+
+
+class AdminCreateRequest(BaseModel):
+    customer: str
+    days: int
+    max_machines: int
+    admin_key: str
+
+
+class AdminLicenseRequest(BaseModel):
+    license_id: int
+    admin_key: str
+
+
+def check_admin_key(admin_key: str):
+
+    expected = os.environ.get("ADMIN_KEY")
+
+    if not expected:
+        raise HTTPException(
+            status_code=500,
+            detail="ADMIN_KEY não configurada no servidor."
+        )
+
+    if not secrets.compare_digest(
+        admin_key,
+        expected
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Chave administrativa inválida."
+        )
+
+
+@app.post("/admin/create")
+def admin_create(data: AdminCreateRequest):
+
+    check_admin_key(data.admin_key)
+
+    if not data.customer.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Nome do cliente obrigatório."
+        )
+
+    if data.days < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Quantidade de dias inválida."
+        )
+
+    if data.max_machines < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Quantidade de computadores inválida."
+        )
+
+    license_key = generate_license_key()
+
+    if data.days > 0:
+        expires_at = (
+            datetime.now(timezone.utc)
+            + timedelta(days=data.days)
+        ).isoformat()
+    else:
+        expires_at = None
+
+    conn = get_db()
+
+    row = conn.execute(
+        """
+        INSERT INTO licenses (
+            license_key_hash,
+            customer,
+            status,
+            expires_at,
+            max_machines,
+            created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            hash_value(license_key),
+            data.customer.strip(),
+            "active",
+            expires_at,
+            data.max_machines,
+            utc_now()
+        )
+    ).fetchone()
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "success": True,
+        "id": row["id"],
+        "customer": data.customer.strip(),
+        "license_key": license_key,
+        "expires_at": expires_at,
+        "max_machines": data.max_machines
+    }
+
+
+@app.post("/admin/list")
+def admin_list(data: dict):
+
+    check_admin_key(data.get("admin_key", ""))
+
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            customer,
+            status,
+            expires_at,
+            max_machines,
+            created_at
+        FROM licenses
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return {
+        "licenses": rows
+    }
+
+
+@app.post("/admin/revoke")
+def admin_revoke(data: AdminLicenseRequest):
+
+    check_admin_key(data.admin_key)
+
+    conn = get_db()
+
+    result = conn.execute(
+        """
+        UPDATE licenses
+        SET status = 'revoked'
+        WHERE id = %s
+        """,
+        (data.license_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Licença não encontrada."
+        )
+
+    return {
+        "success": True,
+        "message": "Licença revogada."
+    }
+
+
+@app.post("/admin/activate")
+def admin_activate(data: AdminLicenseRequest):
+
+    check_admin_key(data.admin_key)
+
+    conn = get_db()
+
+    result = conn.execute(
+        """
+        UPDATE licenses
+        SET status = 'active'
+        WHERE id = %s
+        """,
+        (data.license_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Licença não encontrada."
+        )
+
+    return {
+        "success": True,
+        "message": "Licença ativada."
+    }
