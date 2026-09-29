@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 import hashlib
 import secrets
 import os
+
 import psycopg
+from psycopg.rows import dict_row
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -12,7 +14,7 @@ from pydantic import BaseModel
 # CONFIGURAÇÃO
 # ============================================================
 
-DB_FILE = "licenses.db"
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 app = FastAPI(title="Discord Auto Login - Licensing Server")
 
@@ -22,40 +24,42 @@ app = FastAPI(title="Discord Auto Login - Licensing Server")
 # ============================================================
 
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row
+    )
 
 
 def init_db():
-    conn = get_db()
+    with get_db() as conn:
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS licenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            license_key_hash TEXT UNIQUE NOT NULL,
-            customer TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            expires_at TEXT,
-            max_machines INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        )
-    """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS licenses (
+                id BIGSERIAL PRIMARY KEY,
+                license_key_hash TEXT UNIQUE NOT NULL,
+                customer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                expires_at TEXT,
+                max_machines INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS activations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            license_id INTEGER NOT NULL,
-            machine_id_hash TEXT NOT NULL,
-            first_seen TEXT NOT NULL,
-            last_seen TEXT NOT NULL,
-            UNIQUE(license_id, machine_id_hash),
-            FOREIGN KEY(license_id) REFERENCES licenses(id)
-        )
-    """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS activations (
+                id BIGSERIAL PRIMARY KEY,
+                license_id BIGINT NOT NULL,
+                machine_id_hash TEXT NOT NULL,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                UNIQUE(license_id, machine_id_hash),
+                FOREIGN KEY(license_id)
+                    REFERENCES licenses(id)
+                    ON DELETE CASCADE
+            )
+        """)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 init_db()
@@ -66,7 +70,9 @@ init_db()
 # ============================================================
 
 def hash_value(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()
 
 
 def generate_license_key() -> str:
@@ -124,8 +130,13 @@ def health():
 @app.post("/activate")
 def activate(data: ActivateRequest):
 
-    key_hash = hash_value(data.license_key.strip().upper())
-    machine_hash = hash_value(data.machine_id.strip())
+    key_hash = hash_value(
+        data.license_key.strip().upper()
+    )
+
+    machine_hash = hash_value(
+        data.machine_id.strip()
+    )
 
     conn = get_db()
 
@@ -133,13 +144,14 @@ def activate(data: ActivateRequest):
         """
         SELECT *
         FROM licenses
-        WHERE license_key_hash = ?
+        WHERE license_key_hash = %s
         """,
         (key_hash,)
     ).fetchone()
 
     if not license_row:
         conn.close()
+
         raise HTTPException(
             status_code=404,
             detail="Licença inválida."
@@ -147,23 +159,29 @@ def activate(data: ActivateRequest):
 
     if license_row["status"] != "active":
         conn.close()
+
         raise HTTPException(
             status_code=403,
             detail="Licença desativada."
         )
 
-    # Verificar validade
+    # ========================================================
+    # VERIFICAR VALIDADE
+    # ========================================================
+
     if license_row["expires_at"]:
+
         expiration = datetime.fromisoformat(
             license_row["expires_at"]
         )
 
         if datetime.now(timezone.utc) >= expiration:
+
             conn.execute(
                 """
                 UPDATE licenses
                 SET status = 'expired'
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (license_row["id"],)
             )
@@ -176,13 +194,16 @@ def activate(data: ActivateRequest):
                 detail="Licença expirada."
             )
 
-    # Verificar se este computador já está ativado
+    # ========================================================
+    # VERIFICAR COMPUTADOR
+    # ========================================================
+
     existing = conn.execute(
         """
         SELECT *
         FROM activations
-        WHERE license_id = ?
-        AND machine_id_hash = ?
+        WHERE license_id = %s
+        AND machine_id_hash = %s
         """,
         (
             license_row["id"],
@@ -195,8 +216,8 @@ def activate(data: ActivateRequest):
         conn.execute(
             """
             UPDATE activations
-            SET last_seen = ?
-            WHERE id = ?
+            SET last_seen = %s
+            WHERE id = %s
             """,
             (
                 utc_now(),
@@ -213,17 +234,23 @@ def activate(data: ActivateRequest):
             "status": "active"
         }
 
-    # Quantidade de computadores já utilizados
-    count = conn.execute(
+    # ========================================================
+    # CONTAR COMPUTADORES
+    # ========================================================
+
+    count_row = conn.execute(
         """
-        SELECT COUNT(*)
+        SELECT COUNT(*) AS count
         FROM activations
-        WHERE license_id = ?
+        WHERE license_id = %s
         """,
         (license_row["id"],)
-    ).fetchone()[0]
+    ).fetchone()
+
+    count = count_row["count"]
 
     if count >= license_row["max_machines"]:
+
         conn.close()
 
         raise HTTPException(
@@ -231,7 +258,10 @@ def activate(data: ActivateRequest):
             detail="Limite de computadores atingido."
         )
 
-    # Nova ativação
+    # ========================================================
+    # NOVA ATIVAÇÃO
+    # ========================================================
+
     now = utc_now()
 
     conn.execute(
@@ -242,7 +272,7 @@ def activate(data: ActivateRequest):
             first_seen,
             last_seen
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
         """,
         (
             license_row["id"],
@@ -269,8 +299,13 @@ def activate(data: ActivateRequest):
 @app.post("/validate")
 def validate(data: ValidateRequest):
 
-    key_hash = hash_value(data.license_key.strip().upper())
-    machine_hash = hash_value(data.machine_id.strip())
+    key_hash = hash_value(
+        data.license_key.strip().upper()
+    )
+
+    machine_hash = hash_value(
+        data.machine_id.strip()
+    )
 
     conn = get_db()
 
@@ -278,12 +313,13 @@ def validate(data: ValidateRequest):
         """
         SELECT *
         FROM licenses
-        WHERE license_key_hash = ?
+        WHERE license_key_hash = %s
         """,
         (key_hash,)
     ).fetchone()
 
     if not license_row:
+
         conn.close()
 
         raise HTTPException(
@@ -292,12 +328,17 @@ def validate(data: ValidateRequest):
         )
 
     if license_row["status"] != "active":
+
         conn.close()
 
         raise HTTPException(
             status_code=403,
             detail="Licença não está ativa."
         )
+
+    # ========================================================
+    # VERIFICAR VALIDADE
+    # ========================================================
 
     if license_row["expires_at"]:
 
@@ -311,7 +352,7 @@ def validate(data: ValidateRequest):
                 """
                 UPDATE licenses
                 SET status = 'expired'
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (license_row["id"],)
             )
@@ -324,12 +365,16 @@ def validate(data: ValidateRequest):
                 detail="Licença expirada."
             )
 
+    # ========================================================
+    # VERIFICAR ATIVAÇÃO
+    # ========================================================
+
     activation = conn.execute(
         """
         SELECT *
         FROM activations
-        WHERE license_id = ?
-        AND machine_id_hash = ?
+        WHERE license_id = %s
+        AND machine_id_hash = %s
         """,
         (
             license_row["id"],
@@ -338,6 +383,7 @@ def validate(data: ValidateRequest):
     ).fetchone()
 
     if not activation:
+
         conn.close()
 
         raise HTTPException(
@@ -345,11 +391,15 @@ def validate(data: ValidateRequest):
             detail="Este computador não está ativado."
         )
 
+    # ========================================================
+    # ATUALIZAR ÚLTIMO ACESSO
+    # ========================================================
+
     conn.execute(
         """
         UPDATE activations
-        SET last_seen = ?
-        WHERE id = ?
+        SET last_seen = %s
+        WHERE id = %s
         """,
         (
             utc_now(),
