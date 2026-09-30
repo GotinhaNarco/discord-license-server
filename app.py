@@ -612,3 +612,44 @@ def admin_activate(data: AdminLicenseRequest):
         "success": True,
         "message": "Licença ativada."
     }
+# ============================================================
+# EXCLUIR LICENÇA
+# ============================================================
+
+@app.post("/admin/delete")
+def admin_delete(data: AdminLicenseRequest):
+
+    check_admin_key(data.admin_key)
+
+    conn = get_db()
+
+    conn.execute(
+        """
+        DELETE FROM activations
+        WHERE license_id = %s
+        """,
+        (data.license_id,)
+    )
+
+    result = conn.execute(
+        """
+        DELETE FROM licenses
+        WHERE id = %s
+        """,
+        (data.license_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    if result.rowcount == 0:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Licença não encontrada."
+        )
+
+    return {
+        "success": True,
+        "message": "Licença excluída permanentemente."
+    }
