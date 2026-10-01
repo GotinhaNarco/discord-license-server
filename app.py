@@ -83,7 +83,7 @@ def generate_license_key() -> str:
         secrets.token_hex(2).upper(),
     ]
 
-    return "ZNC-" + "-".join(parts)
+    return "GOTINHADC-" + "-".join(parts)
 
 
 def utc_now() -> str:
