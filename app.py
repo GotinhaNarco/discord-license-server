@@ -89,6 +89,32 @@ def generate_license_key() -> str:
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def get_license_info(license_row):
+    expires_at = license_row["expires_at"]
+    days_remaining = None
+
+    if expires_at:
+        expiration = datetime.fromisoformat(expires_at)
+
+        if expiration.tzinfo is None:
+            expiration = expiration.replace(tzinfo=timezone.utc)
+
+        seconds_remaining = (
+            expiration - datetime.now(timezone.utc)
+        ).total_seconds()
+
+        days_remaining = max(
+            0,
+            int((seconds_remaining + 86399) // 86400)
+        )
+
+    return {
+        "customer": license_row["customer"],
+        "expires_at": expires_at,
+        "days_remaining": days_remaining,
+        "status": license_row["status"]
+    }
+
 
 # ============================================================
 # MODELOS
@@ -231,13 +257,12 @@ def activate(data: ActivateRequest):
         return {
             "success": True,
             "message": "Computador já ativado.",
-            "status": "active"
+            **get_license_info(license_row)
         }
 
     # ========================================================
     # CONTAR COMPUTADORES
     # ========================================================
-
     count_row = conn.execute(
         """
         SELECT COUNT(*) AS count
@@ -288,14 +313,13 @@ def activate(data: ActivateRequest):
     return {
         "success": True,
         "message": "Licença ativada com sucesso.",
-        "status": "active"
+        **get_license_info(license_row)
     }
 
 
 # ============================================================
 # VALIDAÇÃO
 # ============================================================
-
 @app.post("/validate")
 def validate(data: ValidateRequest):
 
@@ -412,7 +436,7 @@ def validate(data: ValidateRequest):
 
     return {
         "success": True,
-        "status": "active"
+        **get_license_info(license_row)
     }
 # ============================================================
 # ADMINISTRAÇÃO
